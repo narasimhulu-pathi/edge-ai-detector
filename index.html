@@ -58,6 +58,25 @@
   label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; margin-left: auto; }
   input[type=range] { width: 110px; accent-color: var(--accent); }
   #thr { font-family: var(--font-mono); color: var(--fg); width: 2.5em; }
+  button.stop { background: #e5604f; color: #2a0905; }
+  #results {
+    background: var(--panel); border-bottom: 1px solid #2c353d;
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center; min-height: 52px;
+    padding-block: 10px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  #results .empty { color: var(--muted); font-size: 13px; }
+  .chip {
+    font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums;
+    padding: 6px 10px; border-radius: 999px; background: #10372d; color: var(--accent);
+  }
+  .chip b { color: var(--fg); font-weight: 600; }
+  #pausedTag {
+    position: absolute; top: 10px; left: max(10px, env(safe-area-inset-left, 0px));
+    background: var(--warn); color: #2b1d02; font: 600 12px var(--font-mono);
+    padding: 4px 8px; border-radius: 6px; letter-spacing: .06em;
+  }
 </style>
 </head>
 <body>
@@ -70,11 +89,15 @@
   <video id="video" playsinline muted autoplay></video>
   <canvas id="overlay"></canvas>
   <div id="status"><div><strong>Runs entirely on this device</strong>Tap Start. The model downloads once (about 4 MB), then every frame is processed locally. No images leave your phone.</div></div>
+  <span id="pausedTag" hidden>PAUSED</span>
 </div>
+
+<div id="results" aria-live="polite"><span class="empty">Detected objects will be listed here.</span></div>
 
 <footer>
   <button id="start">Start camera</button>
-  <button id="flip" class="secondary" disabled>Flip camera</button>
+  <button id="pause" class="secondary" disabled>Pause</button>
+  <button id="flip" class="secondary" disabled>Flip</button>
   <label for="threshold">Min confidence <input id="threshold" type="range" min="0.2" max="0.9" step="0.05" value="0.5"><span id="thr">0.50</span></label>
 </footer>
 
@@ -161,14 +184,65 @@
     }
   }
 
+  const resultsEl = document.getElementById("results");
+  const pauseBtn = document.getElementById("pause");
+  const pausedTag = document.getElementById("pausedTag");
+  let paused = false, lastListUpdate = 0;
+
+  // Group detections by name: "person ×2 · 91%" (highest confidence shown)
+  function showResults(detections, force = false) {
+    const now = performance.now();
+    if (!force && now - lastListUpdate < 300) return; // update ~3×/sec so it's readable
+    lastListUpdate = now;
+    if (!detections.length) {
+      resultsEl.innerHTML = `<span class="empty">${running ? "Nothing detected above the confidence threshold." : "Detected objects will be listed here."}</span>`;
+      return;
+    }
+    const groups = {};
+    for (const d of detections) {
+      const c = d.categories[0];
+      const g = groups[c.categoryName] ??= { count: 0, best: 0 };
+      g.count++; g.best = Math.max(g.best, c.score);
+    }
+    resultsEl.innerHTML = Object.entries(groups)
+      .sort((a, b) => b[1].best - a[1].best)
+      .map(([name, g]) => `<span class="chip"><b>${name}</b>${g.count > 1 ? ` ×${g.count}` : ""} · ${(g.best * 100).toFixed(0)}%</span>`)
+      .join("");
+  }
+
+  function stop() {
+    running = false; paused = false;
+    stream?.getTracks().forEach(t => t.stop());
+    stream = null;
+    video.srcObject = null;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    showResults([], true);
+    pausedTag.hidden = true;
+    pauseBtn.textContent = "Pause";
+    pauseBtn.disabled = true;
+    flipBtn.disabled = true;
+    startBtn.textContent = "Start camera";
+    startBtn.classList.remove("stop");
+    stats.textContent = "stopped";
+    showStatus("Camera stopped", "Tap Start camera to run detection again.");
+  }
+
+  pauseBtn.addEventListener("click", () => {
+    paused = !paused;
+    if (paused) video.pause(); else video.play();
+    pausedTag.hidden = !paused;
+    pauseBtn.textContent = paused ? "Resume" : "Pause";
+  });
+
   function loop() {
     if (!running) return;
-    if (video.readyState >= 2 && video.currentTime !== lastTs) {
+    if (!paused && video.readyState >= 2 && video.currentTime !== lastTs) {
       lastTs = video.currentTime;
       const t0 = performance.now();
       const result = detector.detectForVideo(video, t0);
       const ms = performance.now() - t0;
       draw(result);
+      showResults(result.detections);
       frames++;
       const now = performance.now();
       if (now - fpsT0 > 1000) {
@@ -180,6 +254,7 @@
   }
 
   startBtn.addEventListener("click", async () => {
+    if (running) { stop(); return; }
     startBtn.disabled = true;
     try {
       if (!window.isSecureContext) {
@@ -192,7 +267,10 @@
       statusEl.hidden = true;
       running = true;
       flipBtn.disabled = false;
-      startBtn.textContent = "Running";
+      pauseBtn.disabled = false;
+      startBtn.textContent = "Stop";
+      startBtn.classList.add("stop");
+      startBtn.disabled = false;
       loop();
     } catch (e) {
       console.error(e);
@@ -203,6 +281,7 @@
 
   flipBtn.addEventListener("click", async () => {
     facing = facing === "environment" ? "user" : "environment";
+    if (paused) pauseBtn.click(); // resume when switching cameras
     try { await startCamera(); } catch (e) { showStatus("Couldn't switch camera", e.message); }
   });
 </script>
