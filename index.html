@@ -81,7 +81,7 @@
 </head>
 <body>
 <header>
-  <h1>Edge Object Detector <small style="color:var(--muted);font-weight:400;font-size:12px">v6</small></h1>
+  <h1>Edge Object Detector <small style="color:var(--muted);font-weight:400;font-size:12px">v7</small></h1>
   <span id="stats">model not loaded</span>
 </header>
 
@@ -129,8 +129,10 @@
   window.__appReady = true;
   document.getElementById("stats").textContent = "ready · tap Start camera";
 
-  const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite";
-  const WASM_URL  = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+  // int8 model for CPU (small, fast); float32 for GPU (WebGL delegate requires float32 ops)
+  const MODEL_INT8    = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite";
+  const MODEL_FLOAT32 = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float32/1/efficientdet_lite0.tflite";
+  const WASM_URL      = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 
   const video = document.getElementById("video");
   const canvas = document.getElementById("overlay");
@@ -181,7 +183,7 @@
     for (const delegate of order) {
       try {
         detector = await ObjectDetector.createFromOptions(vision, {
-          baseOptions: { modelAssetPath: MODEL_URL, delegate },
+          baseOptions: { modelAssetPath: delegate === "GPU" ? MODEL_FLOAT32 : MODEL_INT8, delegate },
           runningMode: "VIDEO",
           scoreThreshold: threshold,
           maxResults: 8,
