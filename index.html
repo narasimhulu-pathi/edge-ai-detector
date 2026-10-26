@@ -82,7 +82,7 @@
 </head>
 <body>
 <header>
-  <h1>Edge Object Detector <small style="color:var(--muted);font-weight:400;font-size:12px">v8</small></h1>
+  <h1>Edge Object Detector <small style="color:var(--muted);font-weight:400;font-size:12px">v9</small></h1>
   <span id="stats">model not loaded</span>
 </header>
 
@@ -171,7 +171,17 @@
     statusEl.innerHTML = `<div><strong>${title}</strong>${msg}</div>`;
   }
 
+  // iOS Safari uses float16 internally in WebGL shaders regardless of EXT_color_buffer_float,
+  // which corrupts EfficientDet outputs. CPU (WASM) is accurate and fast enough on A-series chips.
+  const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
   const procBtn = document.getElementById("proc");
+  if (isIOS) {
+    procBtn.disabled = true;
+    procBtn.title = "GPU is inaccurate on iOS Safari (WebGL float16 precision). CPU is recommended.";
+    procBtn.textContent = "GPU (iOS: CPU recommended)";
+  }
   let preferred = "CPU", vision = null, totalFrames = 0;
 
   async function loadModel() {
