@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Edge Object Detector</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap">
+<style>
+  /* Layout: full-height camera view, overlay canvas on top, control bar pinned to the bottom */
+  :root {
+    --bg: #0e1114;
+    --panel: #171c21;
+    --fg: #e8edf1;
+    --muted: #8b98a3;
+    --accent: #3ec8a5;
+    --warn: #f2b84b;
+    --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px;
+    display: flex; flex-direction: column;
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  header {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+    padding-block: 12px;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  h1 { font-size: 17px; margin: 0; font-weight: 600; }
+  #stats { font-family: var(--font-mono); font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #stage { position: relative; flex: 1; min-height: 0; background: #000; overflow: hidden; }
+  video, canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  #status {
+    position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+    padding: 24px; color: var(--muted); font-size: 15px; line-height: 1.5;
+  }
+  #status strong { color: var(--fg); display: block; font-size: 18px; margin-bottom: 6px; }
+  footer {
+    display: flex; flex-wrap: wrap; gap: 10px; align-items: center; background: var(--panel);
+    padding-top: 12px;
+    padding-bottom: max(12px, env(safe-area-inset-bottom, 0px));
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+  }
+  button {
+    font: 600 15px var(--font-body); border: 0; border-radius: 10px; padding: 12px 18px;
+    background: var(--accent); color: #062a21; cursor: pointer;
+  }
+  button.secondary { background: transparent; color: var(--fg); outline: 1px solid #2c353d; }
+  button:focus-visible { outline: 2px solid var(--fg); outline-offset: 2px; }
+  button:disabled { opacity: .4; cursor: default; }
+  label { font-size: 13px; color: var(--muted); display: flex; align-items: center; gap: 8px; margin-left: auto; }
+  input[type=range] { width: 110px; accent-color: var(--accent); }
+  #thr { font-family: var(--font-mono); color: var(--fg); width: 2.5em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Edge Object Detector</h1>
+  <span id="stats">model not loaded</span>
+</header>
+
+<div id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="overlay"></canvas>
+  <div id="status"><div><strong>Runs entirely on this device</strong>Tap Start. The model downloads once (about 4 MB), then every frame is processed locally. No images leave your phone.</div></div>
+</div>
+
+<footer>
+  <button id="start">Start camera</button>
+  <button id="flip" class="secondary" disabled>Flip camera</button>
+  <label for="threshold">Min confidence <input id="threshold" type="range" min="0.2" max="0.9" step="0.05" value="0.5"><span id="thr">0.50</span></label>
+</footer>
+
+<script type="module">
+  // MediaPipe Tasks (Vision). Same EfficientDet-Lite0 model as the Raspberry Pi script.
+  import { FilesetResolver, ObjectDetector } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+
+  const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/int8/1/efficientdet_lite0.tflite";
+  const WASM_URL  = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("overlay");
+  const ctx = canvas.getContext("2d");
+  const statusEl = document.getElementById("status");
+  const stats = document.getElementById("stats");
+  const startBtn = document.getElementById("start");
+  const flipBtn = document.getElementById("flip");
+  const slider = document.getElementById("threshold");
+  const thrLabel = document.getElementById("thr");
+
+  let detector = null, stream = null, facing = "environment", running = false;
+  let threshold = parseFloat(slider.value);
+  let lastTs = -1, frames = 0, fpsT0 = performance.now(), delegateUsed = "";
+
+  slider.addEventListener("input", () => {
+    threshold = parseFloat(slider.value);
+    thrLabel.textContent = threshold.toFixed(2);
+    detector?.setOptions({ scoreThreshold: threshold });
+  });
+
+  function showStatus(title, msg) {
+    statusEl.hidden = false;
+    statusEl.innerHTML = `<div><strong>${title}</strong>${msg}</div>`;
+  }
+
+  async function loadModel() {
+    stats.textContent = "loading model…";
+    const vision = await FilesetResolver.forVisionTasks(WASM_URL);
+    // Try GPU first (WebGL), fall back to CPU on devices that don't support it.
+    for (const delegate of ["GPU", "CPU"]) {
+      try {
+        detector = await ObjectDetector.createFromOptions(vision, {
+          baseOptions: { modelAssetPath: MODEL_URL, delegate },
+          runningMode: "VIDEO",
+          scoreThreshold: threshold,
+          maxResults: 8,
+        });
+        delegateUsed = delegate;
+        return;
+      } catch (e) { console.warn(`${delegate} delegate failed`, e); }
+    }
+    throw new Error("Could not create the detector on GPU or CPU.");
+  }
+
+  async function startCamera() {
+    stream?.getTracks().forEach(t => t.stop());
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false,
+    });
+    video.srcObject = stream;
+    await video.play();
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+  }
+
+  function draw(result) {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const scale = canvas.width / 640; // keep labels readable at any resolution
+    ctx.lineWidth = Math.max(2, 3 * scale);
+    ctx.font = `600 ${Math.round(16 * scale)}px "IBM Plex Mono", monospace`;
+    for (const d of result.detections) {
+      const { originX: x, originY: y, width: w, height: h } = d.boundingBox;
+      const c = d.categories[0];
+      const label = `${c.categoryName} ${(c.score * 100).toFixed(0)}%`;
+      ctx.strokeStyle = "#3ec8a5";
+      ctx.strokeRect(x, y, w, h);
+      const tw = ctx.measureText(label).width + 10 * scale;
+      const th = 22 * scale;
+      ctx.fillStyle = "#3ec8a5";
+      ctx.fillRect(x, Math.max(0, y - th), tw, th);
+      ctx.fillStyle = "#062a21";
+      ctx.fillText(label, x + 5 * scale, Math.max(th - 6 * scale, y - 6 * scale));
+    }
+  }
+
+  function loop() {
+    if (!running) return;
+    if (video.readyState >= 2 && video.currentTime !== lastTs) {
+      lastTs = video.currentTime;
+      const t0 = performance.now();
+      const result = detector.detectForVideo(video, t0);
+      const ms = performance.now() - t0;
+      draw(result);
+      frames++;
+      const now = performance.now();
+      if (now - fpsT0 > 1000) {
+        stats.textContent = `${delegateUsed} · ${(frames * 1000 / (now - fpsT0)).toFixed(0)} fps · ${ms.toFixed(0)} ms/frame`;
+        frames = 0; fpsT0 = now;
+      }
+    }
+    requestAnimationFrame(loop);
+  }
+
+  startBtn.addEventListener("click", async () => {
+    startBtn.disabled = true;
+    try {
+      if (!window.isSecureContext) {
+        throw new Error("The camera only works over HTTPS (or on localhost). See the README for hosting options.");
+      }
+      showStatus("Loading model…", "First load downloads the model. Later loads are cached.");
+      if (!detector) await loadModel();
+      showStatus("Starting camera…", "Allow camera access when your browser asks.");
+      await startCamera();
+      statusEl.hidden = true;
+      running = true;
+      flipBtn.disabled = false;
+      startBtn.textContent = "Running";
+      loop();
+    } catch (e) {
+      console.error(e);
+      showStatus("Couldn't start", e.message || String(e));
+      startBtn.disabled = false;
+    }
+  });
+
+  flipBtn.addEventListener("click", async () => {
+    facing = facing === "environment" ? "user" : "environment";
+    try { await startCamera(); } catch (e) { showStatus("Couldn't switch camera", e.message); }
+  });
+</script>
+</body>
+</html>
