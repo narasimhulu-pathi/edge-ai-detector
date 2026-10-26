@@ -81,7 +81,7 @@
 </head>
 <body>
 <header>
-  <h1>Edge Object Detector <small style="color:var(--muted);font-weight:400;font-size:12px">v5</small></h1>
+  <h1>Edge Object Detector <small style="color:var(--muted);font-weight:400;font-size:12px">v6</small></h1>
   <span id="stats">model not loaded</span>
 </header>
 
@@ -146,6 +146,17 @@
   let threshold = parseFloat(slider.value);
   let lastTs = -1, frames = 0, fpsT0 = performance.now(), delegateUsed = "";
 
+  function webglDiag() {
+    try {
+      const c = document.createElement("canvas");
+      const gl = c.getContext("webgl2");
+      if (!gl) return "wgl2:NO";
+      const ext = !!gl.getExtension("EXT_color_buffer_float");
+      return `wgl2:YES ext_cbf:${ext ? "YES" : "NO"}`;
+    } catch { return "wgl2:ERR"; }
+  }
+  let gpuDiag = "";
+
   slider.addEventListener("input", () => {
     threshold = parseFloat(slider.value);
     thrLabel.textContent = threshold.toFixed(2);
@@ -176,6 +187,7 @@
           maxResults: 8,
         });
         delegateUsed = delegate;
+        gpuDiag = delegate === "GPU" ? " · " + webglDiag() : "";
         procBtn.textContent = delegate === "GPU" ? "Use CPU" : "Use GPU";
         return;
       } catch (e) { console.warn(`${delegate} delegate failed`, e); }
@@ -300,7 +312,7 @@
         frames++; totalFrames++;
         const now = performance.now();
         if (now - fpsT0 > 1000) {
-          stats.textContent = `${delegateUsed} · ${(frames * 1000 / (now - fpsT0)).toFixed(0)} fps · ${ms.toFixed(0)} ms · ${objectCount} object${objectCount === 1 ? "" : "s"}`;
+          stats.textContent = `${delegateUsed} · ${(frames * 1000 / (now - fpsT0)).toFixed(0)} fps · ${ms.toFixed(0)} ms · ${objectCount} object${objectCount === 1 ? "" : "s"}${gpuDiag}`;
           frames = 0; fpsT0 = now;
         }
       } catch (e) {
