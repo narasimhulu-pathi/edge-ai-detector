@@ -98,6 +98,7 @@
   <button id="start">Start camera</button>
   <button id="pause" class="secondary" disabled>Pause</button>
   <button id="flip" class="secondary" disabled>Flip</button>
+  <button id="proc" class="secondary" title="Switch between GPU and CPU processing">Use CPU</button>
   <label for="threshold">Min confidence <input id="threshold" type="range" min="0.2" max="0.9" step="0.05" value="0.5"><span id="thr">0.50</span></label>
 </footer>
 
@@ -133,11 +134,17 @@
     statusEl.innerHTML = `<div><strong>${title}</strong>${msg}</div>`;
   }
 
+  const procBtn = document.getElementById("proc");
+  let preferred = "GPU", vision = null, totalFrames = 0;
+
   async function loadModel() {
     stats.textContent = "loading model…";
-    const vision = await FilesetResolver.forVisionTasks(WASM_URL);
-    // Try GPU first (WebGL), fall back to CPU on devices that don't support it.
-    for (const delegate of ["GPU", "CPU"]) {
+    vision ??= await FilesetResolver.forVisionTasks(WASM_URL);
+    detector?.close();
+    detector = null;
+    // Try the preferred processor first, then fall back to the other one.
+    const order = preferred === "GPU" ? ["GPU", "CPU"] : ["CPU", "GPU"];
+    for (const delegate of order) {
       try {
         detector = await ObjectDetector.createFromOptions(vision, {
           baseOptions: { modelAssetPath: MODEL_URL, delegate },
@@ -146,6 +153,7 @@
           maxResults: 8,
         });
         delegateUsed = delegate;
+        procBtn.textContent = delegate === "GPU" ? "Use CPU" : "Use GPU";
         return;
       } catch (e) { console.warn(`${delegate} delegate failed`, e); }
     }
@@ -234,24 +242,58 @@
     pauseBtn.textContent = paused ? "Resume" : "Pause";
   });
 
+  // Run detection once per animation frame. We don't rely on video.currentTime
+  // because some phone browsers don't advance it for a live camera stream.
   function loop() {
     if (!running) return;
-    if (!paused && video.readyState >= 2 && video.currentTime !== lastTs) {
-      lastTs = video.currentTime;
-      const t0 = performance.now();
-      const result = detector.detectForVideo(video, t0);
-      const ms = performance.now() - t0;
-      draw(result);
-      showResults(result.detections);
-      frames++;
-      const now = performance.now();
-      if (now - fpsT0 > 1000) {
-        stats.textContent = `${delegateUsed} · ${(frames * 1000 / (now - fpsT0)).toFixed(0)} fps · ${ms.toFixed(0)} ms/frame`;
-        frames = 0; fpsT0 = now;
+    if (!paused && detector && video.readyState >= 2 && video.videoWidth > 0) {
+      if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
+        canvas.width = video.videoWidth;   // camera size can change after start or flip
+        canvas.height = video.videoHeight;
+      }
+      let ts = performance.now();
+      if (ts <= lastTs) ts = lastTs + 1;   // timestamps must always increase
+      lastTs = ts;
+      try {
+        const t0 = performance.now();
+        const result = detector.detectForVideo(video, ts);
+        const ms = performance.now() - t0;
+        draw(result);
+        showResults(result.detections);
+        frames++; totalFrames++;
+        const now = performance.now();
+        if (now - fpsT0 > 1000) {
+          stats.textContent = `${delegateUsed} · ${(frames * 1000 / (now - fpsT0)).toFixed(0)} fps · ${ms.toFixed(0)} ms · ${totalFrames} frames`;
+          frames = 0; fpsT0 = now;
+        }
+      } catch (e) {
+        console.error(e);
+        showStatus("Detection error", `${e.message || e}<br><br>Try the <b>Use ${delegateUsed === "GPU" ? "CPU" : "GPU"}</b> button.`);
+        statusEl.style.background = "rgba(0,0,0,.6)";
+        running = false;
+        startBtn.textContent = "Start camera";
+        startBtn.classList.remove("stop");
+        return;
       }
     }
     requestAnimationFrame(loop);
   }
+
+  procBtn.addEventListener("click", async () => {
+    preferred = delegateUsed === "GPU" ? "CPU" : (delegateUsed === "CPU" ? "GPU" : (preferred === "GPU" ? "CPU" : "GPU"));
+    if (!detector && !running) { procBtn.textContent = preferred === "GPU" ? "Use CPU" : "Use GPU"; return; }
+    const wasRunning = running;
+    running = false;
+    procBtn.disabled = true;
+    try {
+      await loadModel();
+      statusEl.hidden = wasRunning || !stream;
+      if (wasRunning || stream) { running = true; startBtn.textContent = "Stop"; startBtn.classList.add("stop"); loop(); }
+    } catch (e) {
+      showStatus("Couldn't switch processor", e.message || String(e));
+    }
+    procBtn.disabled = false;
+  });
 
   startBtn.addEventListener("click", async () => {
     if (running) { stop(); return; }
